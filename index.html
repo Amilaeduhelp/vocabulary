@@ -149,6 +149,9 @@
   form.dlg textarea{ resize:vertical; }
   form.dlg input:focus, form.dlg textarea:focus{ outline:2px solid var(--gold); outline-offset:1px; }
   .dlg-actions{ display:flex; gap:8px; justify-content:flex-end; align-items:center; flex-wrap:wrap; }
+  .warn{ display:none; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--gold-soft);
+    border:1px solid #E5CE94; border-left:4px solid var(--gold); color:#4A3410; border-radius:8px;
+    padding:9px 12px; font-size:13.5px; }
   .dlg-msg{ margin-right:auto; color:var(--pine-light); font-size:13px; }
 
   /* ---------- login / banner / toast ---------- */
@@ -281,6 +284,7 @@
   <form class="dlg" id="form" method="dialog">
     <label>Word (වචනය)
       <input id="fWord" type="text" required maxlength="120" autocomplete="off" placeholder="e.g. Mother">
+      <div class="warn" id="fWarn"></div>
     </label>
     <label>Meaning (අර්ථය, ඉංග්‍රීසියෙන්)
       <textarea id="fMeaning" rows="3" required placeholder="a female parent of a child or animal"></textarea>
@@ -579,6 +583,7 @@ function openDialog(e){
   $('dlgTitle').textContent = e ? 'වචනය සංස්කරණය' : 'අලුත් වචනයක්';
   $('nextBtn').style.display = e ? 'none' : '';
   $('dlgMsg').textContent = '';
+  $('fWarn').style.display = 'none';
   fWord.value = e ? e.word : '';
   fMeaning.value = e ? e.meaning : '';
   fExamples.value = e ? (e.examples || []).join('\n') : '';
@@ -633,14 +638,18 @@ async function commit(){
   }
 }
 
-// live notice while typing a new word
-fWord.addEventListener('input', ()=>{
-  const w = norm(fWord.value);
-  const o = w ? entries.find(x=>x.id !== editingId && norm(x.word) === w) : null;
-  $('dlgMsg').textContent = o
-    ? `⚠ “${o.word}” දැනටමත් ඇත (${o.addedBy || 'නොදනී'}). වෙනස් / වැඩි දියුණු අර්ථයක් නම් පමණක් ඇතුළත් කරන්න.`
-    : '';
-});
+// as soon as the person leaves the Word box, tell them if the word already exists
+function checkWord(){
+  const box = $('fWarn'), w = norm(fWord.value);
+  const same = w ? entries.filter(x=>x.id !== editingId && norm(x.word) === w) : [];
+  if(!same.length){ box.style.display = 'none'; box.textContent = ''; return; }
+  box.textContent = `⚠ “${same[0].word}” දැනටමත් ඇතුළත් කර ඇත:\n` +
+    same.map(x=>`• ${x.meaning}  (${x.addedBy || 'නොදනී'})`).join('\n') +
+    '\nවැඩි දියුණු කළ / වෙනස් අර්ථයක් නම් පමණක් ඇතුළත් කරන්න.';
+  box.style.display = 'block';
+}
+fWord.addEventListener('blur', checkWord);
+fWord.addEventListener('input', ()=>{ $('fWarn').style.display = 'none'; });
 
 $('addBtn').onclick = ()=>openDialog(null);
 $('cancelBtn').onclick = ()=>dlg.close();
@@ -648,6 +657,7 @@ $('form').addEventListener('submit', async ev=>{ ev.preventDefault(); if(await c
 $('nextBtn').onclick = async ()=>{
   const w = fWord.value.trim();
   if(await commit()){
+    $('fWarn').style.display = 'none';
     fWord.value = ''; fMeaning.value = ''; fExamples.value = ''; fSinhala.value = '';
     $('dlgMsg').textContent = `✓ “${w}” save විය`;
     fWord.focus();
