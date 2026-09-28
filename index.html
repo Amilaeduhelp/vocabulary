@@ -101,6 +101,9 @@
     border:1px solid var(--line); border-radius:8px; overflow-wrap:anywhere;
   }
   .card-foot{ margin-top:auto; padding-top:10px; border-top:1px dashed var(--line); display:flex; gap:6px; }
+  .owner{ font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
+  .card .owner:first-of-type{ margin-top:auto; }
+  .card-foot + .owner{ margin-top:0; }
   .sbtn{
     border:1px solid var(--line); background:var(--surface-soft); color:var(--pine);
     padding:6px 12px; border-radius:8px; font-size:12.5px;
@@ -111,6 +114,23 @@
     text-align:center; color:var(--muted); padding:60px 10px; border:1px dashed var(--line);
     border-radius:var(--radius); background:var(--surface-soft);
   }
+
+  /* ---------- search popup (centre of the screen) ---------- */
+  .sr{
+    position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center;
+    background:rgba(20,35,20,.45); padding:16px;
+  }
+  .sr.open{ display:flex; }
+  .sr-panel{
+    width:min(720px,100%); max-height:82vh; background:var(--bg); border-radius:14px;
+    box-shadow:0 20px 60px rgba(20,35,20,.4); display:flex; flex-direction:column; overflow:hidden;
+  }
+  .sr-head{
+    background:var(--pine); color:#F4F1E4; padding:12px 16px;
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+  }
+  .sr-body{ overflow:auto; padding:14px; display:flex; flex-direction:column; gap:12px; }
+  .sr-body .empty{ padding:30px 10px; }
 
   /* ---------- dialog ---------- */
   dialog{
@@ -177,7 +197,7 @@
   /* ---------- PRINT (PDF) layout, modelled on the plan ---------- */
   @media print{
     html, body{ background:#fff !important; }
-    .app, .login, .toast{ display:none !important; }
+    .app, .login, .toast, .sr{ display:none !important; }
     #printArea{
       display:block; color:#000; font-family:'Times New Roman','Noto Serif Sinhala','Noto Sans Sinhala',serif;
       font-size:11pt; line-height:1.35; width:100%;
@@ -243,6 +263,17 @@
     <button class="btn" type="submit" id="loginBtn">Login</button>
   </form>
 </div>
+
+<div class="sr" id="sr">
+  <div class="sr-panel">
+    <div class="sr-head">
+      <span id="srTitle"></span>
+      <button class="btn ghost" id="srClose" type="button">✕ වසන්න</button>
+    </div>
+    <div class="sr-body" id="srBody"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <dialog id="dlg">
@@ -275,7 +306,7 @@ const DOC_TITLE = 'My personal Vocabulary';
 const OWNER     = 'Amila Udawattha';
 
 /* ===== Supabase (the anon key is public by design; the database rules
-         let only the logged-in owner read or change the words) ===== */
+         let every logged-in member read all words, but change only their own) ===== */
 const SUPABASE_URL      = 'https://jcijglwpkfluyzrltimk.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpjaWpnbHdwa2ZsdXl6cmx0aW1rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY4MzU3OTUsImV4cCI6MjA4MjQxMTc5NX0.dvT8OiyVEiYn_DhkMakmSq1Vvr4REDr0kYPnyqCtWHs';
 
@@ -290,7 +321,7 @@ let sb = null;
 let session = null;
 
 const $ = id => document.getElementById(id);
-const q = $('q'), dlg = $('dlg');
+const q = $('q'), dlg = $('dlg'), sr = $('sr');
 const fWord = $('fWord'), fMeaning = $('fMeaning'), fExamples = $('fExamples'), fSinhala = $('fSinhala');
 
 function el(tag, cls, text){
@@ -306,15 +337,20 @@ function toast(msg, isErr){
   clearTimeout(toast._t);
   toast._t = setTimeout(()=>{ t.className = 'toast'; }, isErr ? 6000 : 2500);
 }
+// compare words / meanings ignoring case, spaces and punctuation
+function norm(s){ return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim(); }
+// true when the word was added by the logged-in person
+function isMine(e){ return !!(session && session.user && e.userId === session.user.id); }
 
 /* CLOUD-START */
 function rowToEntry(r){
   return { id:r.id, word:r.word, meaning:r.meaning, examples:r.examples || [],
-           sinhala:r.sinhala || '', created:Date.parse(r.created_at) || Date.now() };
+           sinhala:r.sinhala || '', created:Date.parse(r.created_at) || Date.now(),
+           userId:r.user_id || null, addedBy:r.added_by || '' };
 }
 function niceErr(error){
   if(!error) return '';
-  if(error.code === '23505') return 'මේ වචනය දැනටමත් ඇත.';
+  if(error.code === '23505') return 'මේ වචනය දැනටමත් ඇත (Supabase හි unique නීතියක් ඉතිරිව ඇත — SQL ගොනුව නැවත run කරන්න).';
   return error.message || String(error);
 }
 function legacyEntries(){
@@ -348,7 +384,8 @@ async function saveEntry(fields){
     const i = entries.findIndex(x=>x.id === editingId);
     if(i >= 0) entries[i] = rowToEntry(data); else entries.push(rowToEntry(data));
   }else{
-    const { data, error } = await sb.from('vocabulary').insert(fields).select().single();
+    const { data, error } = await sb.from('vocabulary')
+      .insert({ ...fields, user_id:session.user.id, added_by:session.user.email }).select().single();
     if(error) throw error;
     entries.push(rowToEntry(data));
   }
@@ -357,6 +394,7 @@ async function saveEntry(fields){
 }
 
 async function removeEntry(e){
+  if(!isMine(e)){ toast('ඔබට මකා දැමිය හැක්කේ ඔබ ඇතුළත් කළ වචන පමණි.', true); return; }
   if(!confirm(`“${e.word}” මකා දමන්නද?`)) return;
   const { error } = await sb.from('vocabulary').delete().eq('id', e.id);
   if(error){ toast('මකන්න නොහැකි විය: ' + niceErr(error), true); return; }
@@ -365,17 +403,17 @@ async function removeEntry(e){
   render();
 }
 
-// adds many words at once; skips words that already exist; returns how many were added
+// adds many words at once; skips a word only if the same word AND meaning already exist; returns how many were added
 async function insertMany(list){
-  const have = new Set(entries.map(x=>x.word.toLowerCase()));
+  const have = new Set(entries.map(x=>norm(x.word) + '|' + norm(x.meaning)));
   const fresh = [];
   list.forEach(x=>{
     const w = String(x.word || '').trim().replace(/\s+/g,' ');
     const m = String(x.meaning || '').trim();
-    const k = w.toLowerCase();
+    const k = norm(w) + '|' + norm(m);
     if(w && m && w.length <= 120 && !have.has(k)){
       have.add(k);
-      fresh.push({ word:w, meaning:m,
+      fresh.push({ user_id:session.user.id, added_by:session.user.email, word:w, meaning:m,
         examples:Array.isArray(x.examples) ? x.examples.map(String).map(s=>s.trim()).filter(Boolean) : [],
         sinhala:x.sinhala ? String(x.sinhala) : '' });
     }
@@ -462,21 +500,22 @@ function card(e){
     x.appendChild(ul);
     c.appendChild(x);
   }
-  const foot = el('div','card-foot');
-  const ed = el('button','sbtn','Edit'); ed.onclick = ()=>openDialog(e);
-  const del = el('button','sbtn del','මකන්න');
-  del.onclick = ()=>removeEntry(e);
-  foot.appendChild(ed); foot.appendChild(del);
-  c.appendChild(foot);
+  // Edit / delete only for the person who added the word
+  if(isMine(e)){
+    const foot = el('div','card-foot');
+    const ed = el('button','sbtn','Edit'); ed.onclick = ()=>openDialog(e);
+    const del = el('button','sbtn del','මකන්න'); del.onclick = ()=>removeEntry(e);
+    foot.appendChild(ed); foot.appendChild(del);
+    c.appendChild(foot);
+  }
+  // who added it
+  c.appendChild(el('div','owner','✉ ' + (e.addedBy || 'නොදනී')));
   return c;
 }
 
 function render(){
-  const term = q.value.trim().toLowerCase();
-  const shown = sorted().filter(e=>{
-    if(!term) return true;
-    return [e.word, e.meaning, e.sinhala || '', ...(e.examples || [])].join('\n').toLowerCase().includes(term);
-  });
+  if(sr.classList.contains('open')) fillSearch();
+  const shown = sorted();
 
   const present = new Set(shown.map(e=>letterOf(e.word)));
   const strip = $('strip'); strip.innerHTML = '';
@@ -486,11 +525,11 @@ function render(){
     b.onclick = ()=>{ const t = document.getElementById('L-' + (L === '#' ? 'other' : L)); if(t) t.scrollIntoView({behavior:'smooth', block:'start'}); };
     strip.appendChild(b);
   });
-  strip.appendChild(el('span','status', term ? `වචන ${shown.length}ක් හමුවිය` : `වචන ${entries.length}ක්`));
+  strip.appendChild(el('span','status', `වචන ${entries.length}ක්`));
 
   const list = $('list'); list.innerHTML = '';
   if(!shown.length){
-    list.appendChild(el('div','empty', entries.length ? 'ගැළපෙන වචනයක් හමු නොවීය.' : '“+ අලුත් වචනයක්” ඔබා පළමු වචනය ඇතුළත් කරන්න.'));
+    list.appendChild(el('div','empty', '“+ අලුත් වචනයක්” ඔබා පළමු වචනය ඇතුළත් කරන්න.'));
     return;
   }
   let cur = '', grid = null;
@@ -507,8 +546,35 @@ function render(){
   });
 }
 
+/* ---------- search popup (shows after the 2nd letter, centred on screen) ---------- */
+function fillSearch(){
+  const term = q.value.trim().toLowerCase();
+  const score = e=>{
+    const w = e.word.toLowerCase();
+    return w.startsWith(term) ? 0 : (w.includes(term) ? 1 : 2);
+  };
+  const hits = sorted()
+    .filter(e=>[e.word, e.meaning, e.sinhala || '', ...(e.examples || [])].join('\n').toLowerCase().includes(term))
+    .sort((a,b)=>score(a) - score(b));
+  $('srTitle').textContent = `“${q.value.trim()}” — වචන ${hits.length}ක් හමුවිය`;
+  const body = $('srBody'); body.innerHTML = '';
+  if(!hits.length){ body.appendChild(el('div','empty','ගැළපෙන වචනයක් හමු නොවීය.')); return; }
+  hits.slice(0, 50).forEach(e=>body.appendChild(card(e)));
+  if(hits.length > 50) body.appendChild(el('div','empty','තවත් ප්‍රතිඵල ඇත — සෙවුම තව දිගු කරන්න.'));
+}
+function closeSearch(){ sr.classList.remove('open'); }
+q.addEventListener('input', ()=>{
+  if(q.value.trim().length < 2){ closeSearch(); return; }
+  fillSearch();
+  sr.classList.add('open');
+});
+$('srClose').onclick = closeSearch;
+sr.addEventListener('click', ev=>{ if(ev.target === sr) closeSearch(); });
+document.addEventListener('keydown', ev=>{ if(ev.key === 'Escape' && !dlg.open) closeSearch(); });
+
 /* ---------- add / edit ---------- */
 function openDialog(e){
+  closeSearch();
   editingId = e ? e.id : null;
   $('dlgTitle').textContent = e ? 'වචනය සංස්කරණය' : 'අලුත් වචනයක්';
   $('nextBtn').style.display = e ? 'none' : '';
@@ -533,11 +599,20 @@ async function commit(){
   const meaning = fMeaning.value.trim();
   if(!word){ fWord.focus(); return false; }
   if(!meaning){ fMeaning.focus(); return false; }
-  const dup = entries.find(x=>x.id !== editingId && x.word.toLowerCase() === word.toLowerCase());
-  if(dup){
-    $('dlgMsg').textContent = `“${dup.word}” දැනටමත් ඇත — එය Edit කරන්න.`;
-    fWord.focus();
-    return false;
+
+  // same word already in the shared dictionary?
+  const same = entries.filter(x=>x.id !== editingId && norm(x.word) === norm(word));
+  if(same.length){
+    const identical = same.find(x=>norm(x.meaning) === norm(meaning));
+    if(identical){
+      $('dlgMsg').textContent = `“${identical.word}” මේ අර්ථයෙන්ම දැනටමත් ඇත (${identical.addedBy || 'නොදනී'}).`;
+      fWord.focus();
+      return false;
+    }
+    const lines = same.map(x=>`• ${x.meaning}  (${x.addedBy || 'නොදනී'})`).join('\n');
+    if(!confirm(`“${word}” දැනටමත් ඇතුළත් කර ඇත:\n\n${lines}\n\nඔබේ අර්ථ දැක්වීම වැඩි දියුණු කළ / වෙනස් එකක් නම් ඇතුළත් කරන්නද?`)){
+      return false;
+    }
   }
   const fields = {
     word, meaning,
@@ -558,6 +633,15 @@ async function commit(){
   }
 }
 
+// live notice while typing a new word
+fWord.addEventListener('input', ()=>{
+  const w = norm(fWord.value);
+  const o = w ? entries.find(x=>x.id !== editingId && norm(x.word) === w) : null;
+  $('dlgMsg').textContent = o
+    ? `⚠ “${o.word}” දැනටමත් ඇත (${o.addedBy || 'නොදනී'}). වෙනස් / වැඩි දියුණු අර්ථයක් නම් පමණක් ඇතුළත් කරන්න.`
+    : '';
+});
+
 $('addBtn').onclick = ()=>openDialog(null);
 $('cancelBtn').onclick = ()=>dlg.close();
 $('form').addEventListener('submit', async ev=>{ ev.preventDefault(); if(await commit()) dlg.close(); });
@@ -572,7 +656,6 @@ $('nextBtn').onclick = async ()=>{
 dlg.addEventListener('keydown', async ev=>{
   if(ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)){ ev.preventDefault(); if(await commit()) dlg.close(); }
 });
-q.addEventListener('input', render);
 document.addEventListener('keydown', ev=>{
   const t = document.activeElement.tagName;
   if(ev.key === '/' && t !== 'INPUT' && t !== 'TEXTAREA'){ ev.preventDefault(); q.focus(); }
@@ -738,8 +821,8 @@ $('restoreFile').onchange = ev=>{
 /* ---------- move the old browser-only words into Supabase ---------- */
 // The banner appears whenever this browser still holds words that Supabase does not have yet.
 function updateBanner(){
-  const have = new Set(entries.map(x=>x.word.toLowerCase()));
-  const missing = legacyEntries().filter(x=>!have.has(String(x.word).trim().replace(/\s+/g,' ').toLowerCase()));
+  const have = new Set(entries.map(x=>norm(x.word) + '|' + norm(x.meaning)));
+  const missing = legacyEntries().filter(x=>!have.has(norm(x.word) + '|' + norm(x.meaning)));
   const show = !!session && cloudOk && missing.length > 0 && !migrateHidden;
   $('migrate').style.display = show ? 'flex' : 'none';
   $('migrateText').textContent = `මෙම browser එකේ කලින් save කළ වචන ${missing.length}ක් Supabase එකේ නැත. ඒවා upload කරන්නද?`;
@@ -797,6 +880,7 @@ async function init(){
     if(event === 'SIGNED_OUT'){
       entries = [];
       cloudOk = false;
+      closeSearch();
       $('loadErr').style.display = 'none';
       try{ localStorage.removeItem(CACHE_KEY); }catch(e){}
       render();
