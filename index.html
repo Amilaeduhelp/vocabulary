@@ -199,7 +199,7 @@
 
   /* ---------- PRINT (PDF) layout, modelled on the plan ---------- */
   @media print{
-    html, body{ background:#fff !important; }
+    html, body{ background:#fff !important; height:auto !important; overflow:visible !important; }
     .app, .login, .toast, .sr{ display:none !important; }
     #printArea{
       display:block; color:#000; font-family:'Times New Roman','Noto Serif Sinhala','Noto Sans Sinhala',serif;
@@ -701,7 +701,13 @@ function buildPrint(){
   });
 }
 window.addEventListener('beforeprint', buildPrint);
-$('pdfBtn').onclick = ()=>{
+// download the newest copy of ALL members' words before exporting
+async function freshAll(){
+  if(!sb || !session) return;
+  try{ entries = await fetchAll(); writeCache(); cloudOk = true; render(); }catch(e){}
+}
+$('pdfBtn').onclick = async ()=>{
+  await freshAll();
   if(!entries.length){ alert('Export කිරීමට වචන කිසිවක් නැත.'); return; }
   buildPrint();
   window.print();   // choose "Save as PDF" as the destination
@@ -795,7 +801,8 @@ function download(blob, name){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
 }
-$('xlsBtn').onclick = ()=>{
+$('xlsBtn').onclick = async ()=>{
+  await freshAll();
   if(!entries.length){ alert('Export කිරීමට වචන කිසිවක් නැත.'); return; }
   download(buildXlsx(sorted()), 'My-personal-Vocabulary-' + today() + '.xlsx');
 };
