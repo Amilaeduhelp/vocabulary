@@ -156,6 +156,7 @@
     border-radius:10px; padding:10px 14px; margin:14px 0 0; font-size:14px;
   }
   .banner span{ flex:1; min-width:200px; }
+  .banner.err{ background:#FBEDED; border-color:#E3B9B9; color:#7A2B2B; }
   .banner .btn{ padding:7px 14px; }
   .toast{
     position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(20px);
@@ -224,6 +225,7 @@
       <button class="btn" id="migrateBtn">Supabase වෙත upload කරන්න</button>
       <button class="btn light" id="migrateHide">පසුව</button>
     </div>
+    <div class="banner err" id="loadErr"></div>
     <div class="strip" id="strip"></div>
     <div id="list"></div>
   </div>
@@ -279,7 +281,8 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const LEGACY_KEY   = 'eduhelp_vocab_v1';          // words saved by the old browser-only version
 const CACHE_KEY    = 'eduhelp_vocab_cache_v1';    // last copy downloaded from Supabase (for a fast start)
-const MIGRATED_KEY = 'eduhelp_vocab_migrated_v1';
+let cloudOk = false;         // true after the last successful download from Supabase
+let migrateHidden = false;   // "පසුව" hides the upload banner only until the page is reloaded
 
 let entries = [];
 let editingId = null;
@@ -386,8 +389,24 @@ async function insertMany(list){
 /* CLOUD-END */
 
 async function refresh(){
-  try{ entries = await fetchAll(); writeCache(); }
-  catch(e){ toast('Supabase වෙතින් දත්ත ගැනීමට නොහැකි විය: ' + niceErr(e), true); }
+  const box = $('loadErr');
+  try{
+    entries = await fetchAll();
+    writeCache();
+    cloudOk = true;
+    box.style.display = 'none';
+  }catch(e){
+    cloudOk = false;
+    const msg = niceErr(e);
+    let hint = '';
+    if(e && (e.code === '42P01' || e.code === 'PGRST205' || /does not exist|schema cache/i.test(msg))){
+      hint = ' — SQL ගොනුවෙන් table එක හදා ඇත්දැයි බලන්න.';
+    }else if(e && (e.code === '42501' || /permission denied/i.test(msg))){
+      hint = ' — SQL ගොනුවේ grant / policy කොටස run කර ඇත්දැයි බලන්න.';
+    }
+    box.textContent = 'Supabase වෙතින් දත්ත ගැනීමට නොහැකි විය: ' + msg + hint;
+    box.style.display = 'flex';
+  }
   render();
   updateBanner();
 }
@@ -716,28 +735,26 @@ $('restoreFile').onchange = ev=>{
   r.readAsText(f);
 };
 
-/* ---------- move the old browser-only words into Supabase (once) ---------- */
+/* ---------- move the old browser-only words into Supabase ---------- */
+// The banner appears whenever this browser still holds words that Supabase does not have yet.
 function updateBanner(){
-  const n = legacyEntries().length;
-  const show = !!session && n > 0 && !localStorage.getItem(MIGRATED_KEY);
+  const have = new Set(entries.map(x=>x.word.toLowerCase()));
+  const missing = legacyEntries().filter(x=>!have.has(String(x.word).trim().replace(/\s+/g,' ').toLowerCase()));
+  const show = !!session && cloudOk && missing.length > 0 && !migrateHidden;
   $('migrate').style.display = show ? 'flex' : 'none';
-  $('migrateText').textContent = `මෙම browser එකේ කලින් save කළ වචන ${n}ක් ඇත. ඒවා Supabase වෙත upload කරන්නද?`;
+  $('migrateText').textContent = `මෙම browser එකේ කලින් save කළ වචන ${missing.length}ක් Supabase එකේ නැත. ඒවා upload කරන්නද?`;
 }
 $('migrateBtn').onclick = async ()=>{
   const btn = $('migrateBtn'); btn.disabled = true;
   try{
     const added = await insertMany(legacyEntries());
-    try{ localStorage.setItem(MIGRATED_KEY, '1'); }catch(e){}
     await refresh();
     toast(`වචන ${added}ක් Supabase වෙත upload කළා.`);
   }catch(err){
     toast('Upload කළ නොහැකි විය: ' + niceErr(err), true);
   }finally{ btn.disabled = false; }
 };
-$('migrateHide').onclick = ()=>{
-  try{ localStorage.setItem(MIGRATED_KEY, '1'); }catch(e){}
-  updateBanner();
-};
+$('migrateHide').onclick = ()=>{ migrateHidden = true; updateBanner(); };
 
 /* ---------- login / logout ---------- */
 function showLogin(msg){
@@ -779,6 +796,8 @@ async function init(){
     session = s;
     if(event === 'SIGNED_OUT'){
       entries = [];
+      cloudOk = false;
+      $('loadErr').style.display = 'none';
       try{ localStorage.removeItem(CACHE_KEY); }catch(e){}
       render();
       updateBanner();
