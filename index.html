@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Tiro+Sinhala&family=Noto+Sans+Sinhala:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style id="pageStyle"></style>
 <style>
   :root{
@@ -130,6 +131,41 @@
   .dlg-actions{ display:flex; gap:8px; justify-content:flex-end; align-items:center; flex-wrap:wrap; }
   .dlg-msg{ margin-right:auto; color:var(--pine-light); font-size:13px; }
 
+  /* ---------- login / banner / toast ---------- */
+  .login{
+    position:fixed; inset:0; z-index:50; background:var(--bg);
+    display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .login.hidden{ display:none; }
+  .login-card{
+    width:min(380px, 100%); background:var(--surface); border:1px solid var(--line);
+    border-top:5px solid var(--pine); border-radius:14px; padding:26px 24px;
+    display:flex; flex-direction:column; gap:12px;
+  }
+  .login-card h1{ font-size:24px; color:var(--pine); }
+  .login-card p{ margin:0 0 4px; color:var(--muted); font-size:13.5px; }
+  .login-card input{
+    padding:12px; border:1px solid var(--line); border-radius:8px; font-family:inherit;
+    font-size:15px; background:var(--surface-soft);
+  }
+  .login-card input:focus{ outline:2px solid var(--gold); outline-offset:1px; }
+  .login-msg{ min-height:18px; font-size:13px; color:var(--danger); }
+  .banner{
+    display:none; align-items:center; gap:10px; flex-wrap:wrap;
+    background:var(--gold-soft); border:1px solid #E5CE94; color:#4A3410;
+    border-radius:10px; padding:10px 14px; margin:14px 0 0; font-size:14px;
+  }
+  .banner span{ flex:1; min-width:200px; }
+  .banner .btn{ padding:7px 14px; }
+  .toast{
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(20px);
+    background:var(--pine); color:#F4F1E4; padding:11px 18px; border-radius:10px; font-size:14px;
+    opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; z-index:60; max-width:90vw;
+  }
+  .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+  .toast.err{ background:var(--danger); }
+  .btn:disabled{ opacity:.6; cursor:default; }
+
   @media (max-width:640px){
     .wrap{ padding:0 14px 50px; }
     .topbar{ padding:14px; }
@@ -140,7 +176,7 @@
   /* ---------- PRINT (PDF) layout, modelled on the plan ---------- */
   @media print{
     html, body{ background:#fff !important; }
-    .app{ display:none !important; }
+    .app, .login, .toast{ display:none !important; }
     #printArea{
       display:block; color:#000; font-family:'Times New Roman','Noto Serif Sinhala','Noto Sans Sinhala',serif;
       font-size:11pt; line-height:1.35; width:100%;
@@ -177,17 +213,35 @@
         <button class="btn ghost" id="backupBtn" title="සියලු දත්ත JSON ගොනුවකට save කරන්න">Backup</button>
         <button class="btn ghost" id="restoreBtn" title="Backup ගොනුවක් නැවත ගන්න">Restore</button>
         <input type="file" id="restoreFile" accept=".json,application/json" hidden>
+        <button class="btn ghost" id="logoutBtn">Logout</button>
       </div>
     </div>
   </header>
 
   <div class="wrap">
+    <div class="banner" id="migrate">
+      <span id="migrateText"></span>
+      <button class="btn" id="migrateBtn">Supabase වෙත upload කරන්න</button>
+      <button class="btn light" id="migrateHide">පසුව</button>
+    </div>
     <div class="strip" id="strip"></div>
     <div id="list"></div>
   </div>
 </div>
 
 <div id="printArea"></div>
+
+<div class="login" id="login">
+  <form class="login-card" id="loginForm">
+    <h1>My personal Vocabulary</h1>
+    <p>ඔබේ දත්ත බැලීමට Login වන්න</p>
+    <input id="lEmail" type="email" required autocomplete="username" placeholder="Email">
+    <input id="lPass" type="password" required autocomplete="current-password" placeholder="Password">
+    <div class="login-msg" id="loginMsg"></div>
+    <button class="btn" type="submit" id="loginBtn">Login</button>
+  </form>
+</div>
+<div class="toast" id="toast"></div>
 
 <dialog id="dlg">
   <div class="dlg-head"><h2 id="dlgTitle">අලුත් වචනයක්</h2></div>
@@ -218,9 +272,19 @@
 const DOC_TITLE = 'My personal Vocabulary';
 const OWNER     = 'Amila Udawattha';
 
-const KEY = 'eduhelp_vocab_v1';
-let entries = load();
+/* ===== Supabase (the anon key is public by design; the database rules
+         let only the logged-in owner read or change the words) ===== */
+const SUPABASE_URL      = 'https://jcijglwpkfluyzrltimk.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpjaWpnbHdwa2ZsdXl6cmx0aW1rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY4MzU3OTUsImV4cCI6MjA4MjQxMTc5NX0.dvT8OiyVEiYn_DhkMakmSq1Vvr4REDr0kYPnyqCtWHs';
+
+const LEGACY_KEY   = 'eduhelp_vocab_v1';          // words saved by the old browser-only version
+const CACHE_KEY    = 'eduhelp_vocab_cache_v1';    // last copy downloaded from Supabase (for a fast start)
+const MIGRATED_KEY = 'eduhelp_vocab_migrated_v1';
+
+let entries = [];
 let editingId = null;
+let sb = null;
+let session = null;
 
 const $ = id => document.getElementById(id);
 const q = $('q'), dlg = $('dlg');
@@ -232,15 +296,101 @@ function el(tag, cls, text){
   if(text !== undefined) e.textContent = text;
   return e;
 }
-function load(){
-  try{ const a = JSON.parse(localStorage.getItem(KEY) || '[]'); return Array.isArray(a) ? a : []; }
+function toast(msg, isErr){
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(()=>{ t.className = 'toast'; }, isErr ? 6000 : 2500);
+}
+
+/* CLOUD-START */
+function rowToEntry(r){
+  return { id:r.id, word:r.word, meaning:r.meaning, examples:r.examples || [],
+           sinhala:r.sinhala || '', created:Date.parse(r.created_at) || Date.now() };
+}
+function niceErr(error){
+  if(!error) return '';
+  if(error.code === '23505') return 'මේ වචනය දැනටමත් ඇත.';
+  return error.message || String(error);
+}
+function legacyEntries(){
+  try{
+    const a = JSON.parse(localStorage.getItem(LEGACY_KEY) || '[]');
+    return Array.isArray(a) ? a.filter(x=>x && x.word && x.meaning) : [];
+  }catch(e){ return []; }
+}
+function readCache(){
+  try{ const a = JSON.parse(localStorage.getItem(CACHE_KEY) || '[]'); return Array.isArray(a) ? a : []; }
   catch(e){ return []; }
 }
-function persist(){
-  try{ localStorage.setItem(KEY, JSON.stringify(entries)); }
-  catch(e){ alert('Save කිරීමට නොහැකි විය (browser storage අවහිර වී ඇත).'); }
+function writeCache(){ try{ localStorage.setItem(CACHE_KEY, JSON.stringify(entries)); }catch(e){} }
+
+async function fetchAll(){
+  const all = [], size = 1000;
+  for(let from = 0; ; from += size){
+    const { data, error } = await sb.from('vocabulary').select('*')
+      .order('created_at', {ascending:true}).range(from, from + size - 1);
+    if(error) throw error;
+    all.push(...data);
+    if(data.length < size) break;
+  }
+  return all.map(rowToEntry);
 }
-function newId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+
+async function saveEntry(fields){
+  if(editingId){
+    const { data, error } = await sb.from('vocabulary').update(fields).eq('id', editingId).select().single();
+    if(error) throw error;
+    const i = entries.findIndex(x=>x.id === editingId);
+    if(i >= 0) entries[i] = rowToEntry(data); else entries.push(rowToEntry(data));
+  }else{
+    const { data, error } = await sb.from('vocabulary').insert(fields).select().single();
+    if(error) throw error;
+    entries.push(rowToEntry(data));
+  }
+  writeCache();
+  render();
+}
+
+async function removeEntry(e){
+  if(!confirm(`“${e.word}” මකා දමන්නද?`)) return;
+  const { error } = await sb.from('vocabulary').delete().eq('id', e.id);
+  if(error){ toast('මකන්න නොහැකි විය: ' + niceErr(error), true); return; }
+  entries = entries.filter(x=>x.id !== e.id);
+  writeCache();
+  render();
+}
+
+// adds many words at once; skips words that already exist; returns how many were added
+async function insertMany(list){
+  const have = new Set(entries.map(x=>x.word.toLowerCase()));
+  const fresh = [];
+  list.forEach(x=>{
+    const w = String(x.word || '').trim().replace(/\s+/g,' ');
+    const m = String(x.meaning || '').trim();
+    const k = w.toLowerCase();
+    if(w && m && w.length <= 120 && !have.has(k)){
+      have.add(k);
+      fresh.push({ word:w, meaning:m,
+        examples:Array.isArray(x.examples) ? x.examples.map(String).map(s=>s.trim()).filter(Boolean) : [],
+        sinhala:x.sinhala ? String(x.sinhala) : '' });
+    }
+  });
+  for(let i = 0; i < fresh.length; i += 200){
+    const { error } = await sb.from('vocabulary').insert(fresh.slice(i, i + 200));
+    if(error) throw error;
+  }
+  return fresh.length;
+}
+/* CLOUD-END */
+
+async function refresh(){
+  try{ entries = await fetchAll(); writeCache(); }
+  catch(e){ toast('Supabase වෙතින් දත්ත ගැනීමට නොහැකි විය: ' + niceErr(e), true); }
+  render();
+  updateBanner();
+}
 function today(){
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
@@ -296,7 +446,7 @@ function card(e){
   const foot = el('div','card-foot');
   const ed = el('button','sbtn','Edit'); ed.onclick = ()=>openDialog(e);
   const del = el('button','sbtn del','මකන්න');
-  del.onclick = ()=>{ if(confirm(`“${e.word}” මකා දමන්නද?`)){ entries = entries.filter(x=>x.id !== e.id); persist(); render(); } };
+  del.onclick = ()=>removeEntry(e);
   foot.appendChild(ed); foot.appendChild(del);
   c.appendChild(foot);
   return c;
@@ -352,7 +502,14 @@ function openDialog(e){
   fWord.focus();
 }
 
-function commit(){
+let busy = false;
+function setBusy(on){
+  busy = on;
+  dlg.querySelectorAll('button').forEach(b=>{ b.disabled = on; });
+}
+
+async function commit(){
+  if(busy) return false;
   const word = fWord.value.trim().replace(/\s+/g,' ');
   const meaning = fMeaning.value.trim();
   if(!word){ fWord.focus(); return false; }
@@ -363,31 +520,38 @@ function commit(){
     fWord.focus();
     return false;
   }
-  const examples = fExamples.value.split('\n').map(s=>s.trim()).filter(Boolean);
-  const sinhala = fSinhala.value.trim();
-  if(editingId){
-    const e = entries.find(x=>x.id === editingId);
-    if(e){ e.word = word; e.meaning = meaning; e.examples = examples; e.sinhala = sinhala; }
-  }else{
-    entries.push({ id:newId(), word, meaning, examples, sinhala, created:Date.now() });
+  const fields = {
+    word, meaning,
+    examples: fExamples.value.split('\n').map(s=>s.trim()).filter(Boolean),
+    sinhala: fSinhala.value.trim()
+  };
+  setBusy(true);
+  $('dlgMsg').textContent = 'Save වෙමින්...';
+  try{
+    await saveEntry(fields);
+    $('dlgMsg').textContent = '';
+    return true;
+  }catch(e){
+    $('dlgMsg').textContent = 'Save කළ නොහැකි විය: ' + niceErr(e);
+    return false;
+  }finally{
+    setBusy(false);
   }
-  persist(); render();
-  return true;
 }
 
 $('addBtn').onclick = ()=>openDialog(null);
 $('cancelBtn').onclick = ()=>dlg.close();
-$('form').addEventListener('submit', ev=>{ ev.preventDefault(); if(commit()) dlg.close(); });
-$('nextBtn').onclick = ()=>{
+$('form').addEventListener('submit', async ev=>{ ev.preventDefault(); if(await commit()) dlg.close(); });
+$('nextBtn').onclick = async ()=>{
   const w = fWord.value.trim();
-  if(commit()){
+  if(await commit()){
     fWord.value = ''; fMeaning.value = ''; fExamples.value = ''; fSinhala.value = '';
     $('dlgMsg').textContent = `✓ “${w}” save විය`;
     fWord.focus();
   }
 };
-dlg.addEventListener('keydown', ev=>{
-  if(ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)){ ev.preventDefault(); if(commit()) dlg.close(); }
+dlg.addEventListener('keydown', async ev=>{
+  if(ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)){ ev.preventDefault(); if(await commit()) dlg.close(); }
 });
 q.addEventListener('input', render);
 document.addEventListener('keydown', ev=>{
@@ -530,30 +694,109 @@ $('backupBtn').onclick = ()=>{
 };
 $('restoreBtn').onclick = ()=>$('restoreFile').click();
 $('restoreFile').onchange = ev=>{
-  const f = ev.target.files[0]; if(!f) return;
+  const input = ev.target;
+  const f = input.files[0]; if(!f) return;
   const r = new FileReader();
-  r.onload = ()=>{
+  r.onload = async ()=>{
+    let incoming;
     try{
       const data = JSON.parse(r.result);
-      const incoming = Array.isArray(data) ? data : (data.entries || []);
-      const have = new Set(entries.map(x=>x.word.toLowerCase()));
-      let added = 0;
-      incoming.forEach(x=>{
-        if(x && x.word && x.meaning && !have.has(String(x.word).toLowerCase())){
-          entries.push({ id:x.id || newId(), word:String(x.word), meaning:String(x.meaning),
-            examples:Array.isArray(x.examples) ? x.examples.map(String) : [], sinhala:x.sinhala ? String(x.sinhala) : '', created:x.created || Date.now() });
-          have.add(String(x.word).toLowerCase()); added++;
-        }
-      });
-      persist(); render();
-      alert(`වචන ${added}ක් අලුතින් එකතු කළා.`);
-    }catch(err){ alert('මේ ගොනුව කියවීමට නොහැකි විය.'); }
-    ev.target.value = '';
+      incoming = Array.isArray(data) ? data : (data.entries || []);
+    }catch(err){ alert('මේ ගොනුව කියවීමට නොහැකි විය.'); input.value = ''; return; }
+    try{
+      const added = await insertMany(incoming);
+      await refresh();
+      toast(`වචන ${added}ක් Supabase වෙත එකතු කළා.`);
+    }catch(err){
+      toast('Restore කළ නොහැකි විය: ' + niceErr(err), true);
+      await refresh();
+    }
+    input.value = '';
   };
   r.readAsText(f);
 };
 
-render();
+/* ---------- move the old browser-only words into Supabase (once) ---------- */
+function updateBanner(){
+  const n = legacyEntries().length;
+  const show = !!session && n > 0 && !localStorage.getItem(MIGRATED_KEY);
+  $('migrate').style.display = show ? 'flex' : 'none';
+  $('migrateText').textContent = `මෙම browser එකේ කලින් save කළ වචන ${n}ක් ඇත. ඒවා Supabase වෙත upload කරන්නද?`;
+}
+$('migrateBtn').onclick = async ()=>{
+  const btn = $('migrateBtn'); btn.disabled = true;
+  try{
+    const added = await insertMany(legacyEntries());
+    try{ localStorage.setItem(MIGRATED_KEY, '1'); }catch(e){}
+    await refresh();
+    toast(`වචන ${added}ක් Supabase වෙත upload කළා.`);
+  }catch(err){
+    toast('Upload කළ නොහැකි විය: ' + niceErr(err), true);
+  }finally{ btn.disabled = false; }
+};
+$('migrateHide').onclick = ()=>{
+  try{ localStorage.setItem(MIGRATED_KEY, '1'); }catch(e){}
+  updateBanner();
+};
+
+/* ---------- login / logout ---------- */
+function showLogin(msg){
+  $('login').classList.remove('hidden');
+  $('loginMsg').textContent = msg || '';
+}
+function hideLogin(){
+  $('login').classList.add('hidden');
+  $('logoutBtn').title = session && session.user ? 'Logout (' + session.user.email + ')' : 'Logout';
+}
+$('loginForm').addEventListener('submit', async ev=>{
+  ev.preventDefault();
+  if(!sb){ showLogin('Supabase library එක load වී නැත. Internet connection එක බලා page එක refresh කරන්න.'); return; }
+  const btn = $('loginBtn'); btn.disabled = true;
+  $('loginMsg').textContent = '';
+  try{
+    const { data, error } = await sb.auth.signInWithPassword({ email:$('lEmail').value.trim(), password:$('lPass').value });
+    if(error){ $('loginMsg').textContent = error.message; return; }
+    session = data.session;
+    $('lPass').value = '';
+    hideLogin();
+    entries = [];
+    render();
+    await refresh();
+  }catch(err){
+    $('loginMsg').textContent = niceErr(err);
+  }finally{ btn.disabled = false; }
+});
+$('logoutBtn').onclick = async ()=>{ if(sb) await sb.auth.signOut(); };
+
+async function init(){
+  render();
+  if(!window.supabase){
+    showLogin('Supabase library එක load වී නැත. Internet connection එක බලා page එක refresh කරන්න.');
+    return;
+  }
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  sb.auth.onAuthStateChange((event, s)=>{
+    session = s;
+    if(event === 'SIGNED_OUT'){
+      entries = [];
+      try{ localStorage.removeItem(CACHE_KEY); }catch(e){}
+      render();
+      updateBanner();
+      showLogin('');
+    }
+  });
+  const { data } = await sb.auth.getSession();
+  session = data.session;
+  if(session){
+    hideLogin();
+    entries = readCache();      // show the last copy instantly, then refresh from Supabase
+    render();
+    refresh();
+  }else{
+    showLogin('');
+  }
+}
+init();
 </script>
 </body>
 </html>
