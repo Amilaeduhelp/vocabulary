@@ -173,6 +173,24 @@
   }
   .login-card input:focus{ outline:2px solid var(--gold); outline-offset:1px; }
   .login-msg{ min-height:18px; font-size:13px; color:var(--danger); }
+  .pendingAdmin{
+    display:none; background:var(--surface); border:1px solid var(--line); border-top:4px solid var(--gold);
+    border-radius:12px; padding:14px 16px; margin:14px 0 0;
+  }
+  .pendingAdmin.show{ display:block; }
+  .pendingAdmin h3{ font-size:15.5px; color:var(--pine); margin-bottom:10px; font-weight:600; font-family:inherit; }
+  .pendingAdmin ul{ margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:8px; }
+  .pendingAdmin li{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    background:var(--surface-soft); border:1px solid var(--line); border-radius:9px; padding:9px 12px;
+  }
+  .pendingAdmin .pw{ font-weight:600; color:var(--pine); flex:1; min-width:140px; overflow-wrap:anywhere; font-size:15px; }
+  .pendingAdmin .pmeta{ font-size:12px; color:var(--muted); white-space:nowrap; }
+  .pendingAdmin .padd{
+    border:1px solid var(--gold); background:var(--gold); color:#fff; padding:7px 13px;
+    border-radius:8px; font-size:13px; font-weight:500;
+  }
+  .pendingAdmin .padd:hover{ background:#a17124; }
   .banner{
     display:none; align-items:center; gap:10px; flex-wrap:wrap;
     background:var(--gold-soft); border:1px solid #E5CE94; color:#4A3410;
@@ -243,6 +261,7 @@
   </header>
 
   <div class="wrap">
+    <div class="pendingAdmin" id="pendingAdmin"></div>
     <div class="banner" id="migrate">
       <span id="migrateText"></span>
       <button class="btn" id="migrateBtn">Supabase වෙත upload කරන්න</button>
@@ -395,6 +414,7 @@ async function saveEntry(fields){
   }
   writeCache();
   render();
+  renderPendingAdmin();
 }
 
 async function removeEntry(e){
@@ -430,6 +450,50 @@ async function insertMany(list){
 }
 /* CLOUD-END */
 
+
+/* ---------- words the public search page sent to admin (this language only) ---------- */
+let pendingWords = [];
+async function fetchPendingWords(){
+  try{
+    const { data, error } = await sb.from('pending_words').select('*').eq('lang','en').order('created_at', {ascending:true});
+    if(error) throw error;
+    pendingWords = data;
+  }catch(e){ pendingWords = []; }
+}
+function renderPendingAdmin(){
+  const box = $('pendingAdmin');
+  const have = new Set(entries.map(x=>norm(x.word)));
+  const seen = new Set(), visible = [];
+  pendingWords.forEach(p=>{
+    const k = norm(p.word);
+    if(have.has(k) || seen.has(k)) return;
+    seen.add(k);
+    visible.push(p);
+  });
+  if(!visible.length){ box.classList.remove('show'); box.innerHTML = ''; return; }
+  box.innerHTML = '';
+  box.appendChild(el('h3','', `පරිශීලකයන් විසින් Admin වෙත යොමු කළ වචන (${visible.length}) — අර්ථය ඇතුළත් කරන්න`));
+  const ul = el('ul');
+  visible.forEach(p=>{
+    const li = document.createElement('li');
+    li.appendChild(el('span','pw', p.word));
+    const when = p.created_at ? new Date(p.created_at).toLocaleDateString('si-LK') : '';
+    li.appendChild(el('span','pmeta', (p.added_by || 'නොදනී') + (when ? ' · ' + when : '')));
+    const b = el('button','padd','අර්ථය ඇතුළත් කරන්න'); b.type = 'button';
+    b.onclick = ()=>fillWordAndOpen(p.word);
+    li.appendChild(b);
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
+  box.classList.add('show');
+}
+function fillWordAndOpen(word){
+  openDialog(null);
+  fWord.value = word;
+  try{ fWord.dispatchEvent(new Event('input')); fWord.dispatchEvent(new Event('blur')); }catch(e){}
+  fMeaning.focus();
+}
+
 async function refresh(){
   const box = $('loadErr');
   try{
@@ -451,6 +515,7 @@ async function refresh(){
   }
   render();
   updateBanner();
+  try{ await fetchPendingWords(); renderPendingAdmin(); }catch(e){}
 }
 function today(){
   const d = new Date();
